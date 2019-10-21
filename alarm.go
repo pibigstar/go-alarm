@@ -2,24 +2,36 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"log"
 	"os"
 	"os/signal"
 	"reflect"
 	"syscall"
 	"time"
 
-	"github.com/olivere/elastic"
+	"github.com/olivere/elastic/v7"
 	"github.com/robfig/cron"
 )
 
-const host = "http://127.0.0.1:9200"
+const host = "http://172.16.0.28:9200"
 
 type MyError struct {
-	KeyWork string
-	Content interface{}
+	KeyWork  string
+	Contents []Content
+}
+
+type Content struct {
+	IP     string `json:"ip,omitempty"`
+	Level  string `json:"level,omitempty"`
+	Method string `json:"method,omitempty"`
+	Msg    string `json:"msg,omitempty"`
+	Ns     string `json:"ns,omitempty"`
+	Org    string `json:"org,omitempty"`
+	Rol    string `json:"role,omitempty"`
+	Svc    string `json:"svc,omitempty"`
+	Tid    string `json:"tid,omitempty"`
+	Type   string `json:"type,omitempty"`
+	User   string `json:"user,omitempty"`
 }
 
 type Alarm interface {
@@ -34,7 +46,7 @@ type DingDing struct {
 }
 
 func (*DingDing) send(err MyError) {
-	fmt.Printf("出现了: %s, 内容: %v, 发送至钉钉", err.KeyWork, err.Content)
+	fmt.Printf("出现了: %s, 内容: %v, 发送至钉钉", err.KeyWork, err.Contents)
 }
 
 var client *esClient
@@ -59,21 +71,35 @@ type ConversationEsDoc struct {
 }
 
 // search the result by query strings
-func (client *esClient) Query(index, typeName string, queryStrings ...string) (*elastic.SearchResult, error) {
-	var queryString string
-	if len(queryStrings) > 0 {
-		queryString = queryStrings[0]
-	}
-	// 根据名字查询
-	query := elastic.NewQueryStringQuery(queryString)
-	result, err := client.Search().Index(index).Type(typeName).TerminateAfter().Query(query).Do(client.ctx)
-	if err != nil {
-		return nil, err
-	}
-	if result.Hits.TotalHits > 0 {
-		return result, nil
-	}
-	return nil, errors.New("query the result is null")
+func (client *esClient) Query(index string, keyword string) (*elastic.SearchResult, error) {
+
+	agg := elastic.NewDateHistogramAggregation().
+		Field("@timestamp").
+		TimeZone("Asia/Shanghai").
+		MinDocCount(1).
+		Interval("1m")
+
+	boolQuery := elastic.NewBoolQuery().
+		Filter(elastic.NewRangeQuery("@timestamp").
+			Format("strict_date_optional_time").
+			Gte(time.Now().Add(time.Hour * -3).Format(time.RFC3339)).
+			Lte(time.Now().Format(time.RFC3339))).
+		Filter(elastic.NewMultiMatchQuery(keyword).
+			Type("best_fields").
+			Lenient(true))
+
+	result, err := client.Search().
+		Index(index).
+		Query(boolQuery).
+		Timeout("30000ms").
+		IgnoreUnavailable(true).
+		Size(500).
+		Aggregation("aggs", agg).
+		Version(true).
+		StoredFields("*").
+		Do(client.ctx)
+
+	return result, err
 }
 
 func main() {
@@ -83,8 +109,8 @@ func main() {
 	a.alarms = append(a.alarms, dingding)
 
 	c := cron.New()
-	c.AddFunc("@every 1m", func() {
-		a.findError("transactionError")
+	c.AddFunc("@every 1s", func() {
+		a.findError("df9ddf8df6c0a912f2c599732c5d5284")
 	})
 
 	c.Start()
@@ -95,28 +121,39 @@ func main() {
 }
 
 func (a *AlarmError) findError(errors ...string) {
-	for _, err := range errors {
-		go func(err string) {
-			result, _ := client.Query("", "", err)
-			if result != nil {
-				docs := result.Each(reflect.TypeOf(ConversationEsDoc{}))
-				for _, alarm := range a.alarms {
-					myErr := MyError{
-						KeyWork: err,
-						Content: docs,
-					}
-					alarm.send(myErr)
-				}
+	for _, errStr := range errors {
+		go func(errStr string) {
+			result, err := client.Query("logstash-dolphin-dev-*", errStr)
+			if err != nil {
+				panic(err)
 			}
-		}(err)
+
+			fmt.Printf("count: %+v \n", result.Hits.TotalHits)
+
+			var content Content
+			docs := result.Each(reflect.TypeOf(content))
+
+			for _, item := range docs {
+				fmt.Printf("%+v \n", item)
+			}
+
+			fmt.Printf("%+v \n", docs)
+
+			myErr := MyError{
+				KeyWork: errStr,
+			}
+
+			for _, alarm := range a.alarms {
+				alarm.send(myErr)
+			}
+
+		}(errStr)
 	}
 }
 
 // Build the elasticSearch the client
 func NewElasticSearchClient() error {
-	errLog := log.New(os.Stdout, "Elastic", log.LstdFlags)
-
-	esCli, err := elastic.NewClient(elastic.SetErrorLog(errLog), elastic.SetURL(host))
+	esCli, err := elastic.NewClient(elastic.SetURL(host))
 	if err != nil {
 		return err
 	}
@@ -125,13 +162,7 @@ func NewElasticSearchClient() error {
 	if err != nil {
 		return err
 	}
-	log.Printf("Elasticsearch returned with code: %d and version: %s", code, result.Version.Number)
-
-	version, err := client.ElasticsearchVersion(host)
-	if err != nil {
-		return err
-	}
-	log.Printf("Elasticsearch version :%s", version)
+	fmt.Printf("Elasticsearch returned with code: %d and version: %s \n", code, result.Version.Number)
 
 	return nil
 }
