@@ -86,7 +86,10 @@ func (client *esClient) Query(index string, keyword string) (*elastic.SearchResu
 			Lte(time.Now().Format(time.RFC3339))).
 		Filter(elastic.NewMultiMatchQuery(keyword).
 			Type("best_fields").
-			Lenient(true))
+			Lenient(true)).
+		Filter(elastic.NewBoolQuery().
+			MinimumNumberShouldMatch(1).
+			Should(elastic.NewMatchQuery("tid", keyword)))
 
 	result, err := client.Search().
 		Index(index).
@@ -110,7 +113,7 @@ func main() {
 
 	c := cron.New()
 	c.AddFunc("@every 1s", func() {
-		a.findError("df9ddf8df6c0a912f2c599732c5d5284")
+		a.findError("2ab84762e15cdcc9bb723993b672281b")
 	})
 
 	c.Start()
