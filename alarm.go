@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"reflect"
 	"syscall"
 	"time"
 
@@ -17,6 +16,7 @@ const host = "http://172.16.0.28:9200"
 
 type MyError struct {
 	KeyWork  string
+	ID       string
 	Contents []Content
 }
 
@@ -46,7 +46,7 @@ type DingDing struct {
 }
 
 func (*DingDing) send(err MyError) {
-	fmt.Printf("出现了: %s, 内容: %v, 发送至钉钉", err.KeyWork, err.Contents)
+	fmt.Printf("出现了: 【%s】 错误, 日志ID: %s \n", err.KeyWork, err.ID)
 }
 
 var client *esClient
@@ -62,12 +62,6 @@ func init() {
 	if err != nil {
 		panic(err)
 	}
-}
-
-type ConversationEsDoc struct {
-	TID         int64     `json:"tid"`
-	Content     string    `json:"content"`
-	PublishedAt time.Time `json:"publishedAt"`
 }
 
 // search the result by query strings
@@ -112,7 +106,7 @@ func main() {
 	a.alarms = append(a.alarms, dingding)
 
 	c := cron.New()
-	c.AddFunc("@every 1s", func() {
+	c.AddFunc("@every 1m", func() {
 		a.findError("2ab84762e15cdcc9bb723993b672281b")
 	})
 
@@ -131,25 +125,19 @@ func (a *AlarmError) findError(errors ...string) {
 				panic(err)
 			}
 
-			fmt.Printf("count: %+v \n", result.Hits.TotalHits)
+			//var content Content
+			//docs := result.Each(reflect.TypeOf(content))
 
-			var content Content
-			docs := result.Each(reflect.TypeOf(content))
+			if result.Hits.TotalHits.Value > 0 {
+				myErr := MyError{
+					KeyWork: errStr,
+					ID:      result.Hits.Hits[0].Id,
+				}
 
-			for _, item := range docs {
-				fmt.Printf("%+v \n", item)
+				for _, alarm := range a.alarms {
+					alarm.send(myErr)
+				}
 			}
-
-			fmt.Printf("%+v \n", docs)
-
-			myErr := MyError{
-				KeyWork: errStr,
-			}
-
-			for _, alarm := range a.alarms {
-				alarm.send(myErr)
-			}
-
 		}(errStr)
 	}
 }
