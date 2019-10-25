@@ -88,7 +88,6 @@ func (client *esClient) Query(index string, keyword string) (*elastic.SearchResu
 		Size(500).
 		Aggregation("aggs", agg).
 		Version(true).
-		StoredFields("*").
 		Do(client.ctx)
 
 	return result, err
