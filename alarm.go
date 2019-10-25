@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"reflect"
 	"syscall"
 	"time"
 
@@ -12,30 +13,28 @@ import (
 	"github.com/robfig/cron"
 )
 
-const host = "http://172.16.0.28:9200"
+const (
+	host      = "http://172.16.0.28:9200"
+	IndexDev  = "logstash-dolphin-dev-%s"
+	IndexProd = "logstash-dolphin-prod-%s"
+)
 
 type MyError struct {
 	KeyWork  string
-	ID       string
-	Contents []Content
+	ID       []string
+	Total    int
+	Contents interface{}
 }
 
 type Content struct {
-	IP     string `json:"ip,omitempty"`
-	Level  string `json:"level,omitempty"`
-	Method string `json:"method,omitempty"`
-	Msg    string `json:"msg,omitempty"`
-	Ns     string `json:"ns,omitempty"`
-	Org    string `json:"org,omitempty"`
-	Rol    string `json:"role,omitempty"`
-	Svc    string `json:"svc,omitempty"`
 	Tid    string `json:"tid,omitempty"`
-	Type   string `json:"type,omitempty"`
-	User   string `json:"user,omitempty"`
+	Level  string `json:"level,omitempty"`
+	Svc    string `json:"svc,omitempty"`
+	Method string `json:"method,omitempty"`
 }
 
 type Alarm interface {
-	send(err MyError)
+	send(err *MyError)
 }
 
 type AlarmError struct {
@@ -45,8 +44,8 @@ type AlarmError struct {
 type DingDing struct {
 }
 
-func (*DingDing) send(err MyError) {
-	fmt.Printf("出现了: 【%s】 错误, 日志ID: %s \n", err.KeyWork, err.ID)
+func (*DingDing) send(err *MyError) {
+	fmt.Printf("出现了: 【%s】 错误 总计: %d 次 日志ID: %s 日志内容: %+v \n", err.KeyWork, err.Total, err.ID, err.Contents)
 }
 
 var client *esClient
@@ -76,20 +75,16 @@ func (client *esClient) Query(index string, keyword string) (*elastic.SearchResu
 	boolQuery := elastic.NewBoolQuery().
 		Filter(elastic.NewRangeQuery("@timestamp").
 			Format("strict_date_optional_time").
-			Gte(time.Now().Add(time.Hour * -3).Format(time.RFC3339)).
+			Gte(time.Now().Add(time.Minute * -1).Format(time.RFC3339)).
 			Lte(time.Now().Format(time.RFC3339))).
-		Filter(elastic.NewMultiMatchQuery(keyword).
-			Type("best_fields").
-			Lenient(true)).
 		Filter(elastic.NewBoolQuery().
 			MinimumNumberShouldMatch(1).
-			Should(elastic.NewMatchQuery("tid", keyword)))
+			Should(elastic.NewMatchPhraseQuery("code", keyword)))
 
 	result, err := client.Search().
 		Index(index).
 		Query(boolQuery).
 		Timeout("30000ms").
-		IgnoreUnavailable(true).
 		Size(500).
 		Aggregation("aggs", agg).
 		Version(true).
@@ -107,7 +102,7 @@ func main() {
 
 	c := cron.New()
 	c.AddFunc("@every 1m", func() {
-		a.findError("2ab84762e15cdcc9bb723993b672281b")
+		a.findError("10404")
 	})
 
 	c.Start()
@@ -120,24 +115,37 @@ func main() {
 func (a *AlarmError) findError(errors ...string) {
 	for _, errStr := range errors {
 		go func(errStr string) {
-			result, err := client.Query("logstash-dolphin-dev-*", errStr)
+
+			date := time.Now().Format("2006.01.02")
+
+			result, err := client.Query(fmt.Sprintf(IndexDev, date), errStr)
 			if err != nil {
 				panic(err)
 			}
 
-			//var content Content
-			//docs := result.Each(reflect.TypeOf(content))
+			if result.TotalHits() > 0 {
 
-			if result.Hits.TotalHits.Value > 0 {
-				myErr := MyError{
-					KeyWork: errStr,
-					ID:      result.Hits.Hits[0].Id,
+				var content Content
+				docs := result.Each(reflect.TypeOf(content))
+
+				var ids []string
+				for _, hit := range result.Hits.Hits {
+					ids = append(ids, hit.Id)
+				}
+
+				myErr := &MyError{
+					KeyWork:  errStr,
+					Total:    len(docs),
+					ID:       ids,
+					Contents: docs,
 				}
 
 				for _, alarm := range a.alarms {
 					alarm.send(myErr)
 				}
+
 			}
+
 		}(errStr)
 	}
 }
